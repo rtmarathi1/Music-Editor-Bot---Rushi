@@ -5,6 +5,9 @@ Fixed Music Editor Full Bot (patched to avoid PosixPath -> InputFile bug)
 - Accepts images, resizes them, and stores per-user cover
 - Opens files as binary streams when sending to Telegram (fixes AttributeError: 'PosixPath' object has no attribute 'read')
 - Uses Application.builder().post_init(on_startup).build()
+
+Drop this file in place of your old `music_editor_fullbot.py`.
+Make sure your requirements include: python-telegram-bot==22.5 mutagen Pillow aiofiles
 """
 
 import os
@@ -103,9 +106,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Usage:\n"
-        "- Send an image to set it as cover.\n"
-        "- Then send an MP3 (audio/document) to embed the cover into the file and get processed file back.\n"
+        "Usage:
+"
+        "- Send an image to set it as cover.
+"
+        "- Then send an MP3 (audio/document) to embed the cover into the file and get processed file back.
+"
         "- You can also send /setmeta Title - Artist to set metadata before uploading the audio."
     )
 
@@ -254,6 +260,16 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # ignore getUpdates conflict errors (happens if another instance uses getUpdates)
+    err = getattr(context, "error", None)
+    try:
+        # telegram.error.Conflict has class name 'Conflict' and may appear nested in exceptions
+        if err is not None and "Conflict: terminated by other getUpdates request" in str(err):
+            logger.warning("Ignoring getUpdates Conflict (another instance running): %s", err)
+            return
+    except Exception:
+        pass
+
     logger.error("Exception while handling an update: %s", context.error)
     try:
         if isinstance(update, Update) and update.effective_message:
@@ -298,7 +314,10 @@ def main() -> None:
     app = build_application()
 
     # Run polling. In production you may prefer webhook.
-    app.run_polling()
+    try:
+        app.run_polling()
+    except Exception as e:
+        logger.exception("Polling exited with exception: %s", e)
 
 
 if __name__ == "__main__":
