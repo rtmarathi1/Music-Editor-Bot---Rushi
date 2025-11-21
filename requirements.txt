@@ -1,4 +1,5 @@
-python-telegram-bot>=20.5
+python-telegram-bot==22.5
 aiofiles
-Pillow
+Pillow==12.0.0
 python-dotenv
+httpx==0.28.1
