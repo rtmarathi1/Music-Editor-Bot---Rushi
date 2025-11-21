@@ -47,6 +47,7 @@ def ensure_chat_settings(chat_id):
     if ks not in settings["chats"]:
         settings["chats"][ks] = {
             "artist": None,
+            "song_title": None,
             "picture_file_id": None,
             "last_edit_params": {}
         }
@@ -56,7 +57,11 @@ def ensure_chat_settings(chat_id):
 # ---------------- UTILITIES ----------------
 async def save_file_from_telegram(file_obj, dest_path: str):
     file = await file_obj.get_file()
-    await file.download_to_drive(dest_path)
+    # use download_to_drive if available (PTB compatibility)
+    if hasattr(file, "download_to_drive"):
+        await file.download_to_drive(dest_path)
+    else:
+        await file.download(dest_path)
     return dest_path
 
 
@@ -118,6 +123,7 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = (
         "Commands:\n"
         "/setartist <name>\n"
+        "/settitle <song name>\n"
         "/setpic\n"
         "/connect_channel\n\n"
         "Editing:\n"
@@ -144,6 +150,18 @@ async def set_artist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Artist set to: {cs['artist']}")
 
 
+# ---------- NEW: set_title handler ----------
+async def set_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Usage: /settitle <song name>"""
+    if not ctx.args:
+        await update.message.reply_text("Usage: /settitle <song name>")
+        return
+    cs = ensure_chat_settings(update.effective_chat.id)
+    cs["song_title"] = " ".join(ctx.args).strip()
+    save_json(SETTINGS_FILE, settings)
+    await update.message.reply_text(f"Song title set to: {cs['song_title']}")
+
+
 async def set_pic_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['awaiting_pic_for_chat'] = update.effective_chat.id
     await update.message.reply_text("Send the photo you want as album art.")
@@ -152,13 +170,36 @@ async def set_pic_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def photo_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     awaiting_chat = ctx.user_data.get('awaiting_pic_for_chat')
     if awaiting_chat and awaiting_chat == update.effective_chat.id:
-        photo = update.message.photo[-1]
-        file_id = photo.file_id
-        cs = ensure_chat_settings(awaiting_chat)
-        cs["picture_file_id"] = file_id
-        save_json(SETTINGS_FILE, settings)
-        ctx.user_data.pop('awaiting_pic_for_chat', None)
-        await update.message.reply_text("Album art saved.")
+        # if photo is present
+        if update.message.photo:
+            photo = update.message.photo[-1]
+            file_id = photo.file_id
+            cs = ensure_chat_settings(awaiting_chat)
+            cs["picture_file_id"] = file_id
+            save_json(SETTINGS_FILE, settings)
+            ctx.user_data.pop('awaiting_pic_for_chat', None)
+            await update.message.reply_text("Album art saved.")
+            return
+        # if document image
+        if update.message.document and update.message.document.mime_type and update.message.document.mime_type.startswith("image/"):
+            file = await update.message.document.get_file()
+            # upload as photo to get file_id
+            bio_path = mkstemp()[1]
+            await save_file_from_telegram(file, bio_path)
+            with open(bio_path, "rb") as fh:
+                sent = await ctx.bot.send_photo(chat_id=awaiting_chat, photo=fh)
+            try:
+                os.remove(bio_path)
+            except:
+                pass
+            cs = ensure_chat_settings(awaiting_chat)
+            cs["picture_file_id"] = sent.photo[-1].file_id
+            save_json(SETTINGS_FILE, settings)
+            ctx.user_data.pop('awaiting_pic_for_chat', None)
+            await update.message.reply_text("Album art saved (uploaded image).")
+            return
+
+        await update.message.reply_text("Please send a photo or upload an image file (PNG/JPEG).")
         return
 
     awaiting_channel = ctx.user_data.get('awaiting_channel_connect')
@@ -168,6 +209,15 @@ async def photo_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save_json(SETTINGS_FILE, settings)
         ctx.user_data.pop('awaiting_channel_connect', None)
         await update.message.reply_text(f"Channel registered: {channel.title}")
+        return
+
+    # If not awaited, ignore or allow quick save from a photo message
+    if update.message.photo:
+        photo = update.message.photo[-1]
+        cs = ensure_chat_settings(update.effective_chat.id)
+        cs["picture_file_id"] = photo.file_id
+        save_json(SETTINGS_FILE, settings)
+        await update.message.reply_text("Album art saved.")
         return
 
 
@@ -190,7 +240,12 @@ async def connect_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def stats_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     t = stats.get("total_processed", 0)
-    await update.message.reply_text(f"Total processed: {t}")
+    by_user = stats.get("by_user", {})
+    top = sorted(by_user.items(), key=lambda x: -x[1])[:10]
+    lines = [f"Total processed audios: {t}", "Top chats:"]
+    for uid, cnt in top:
+        lines.append(f"- {uid}: {cnt}")
+    await update.message.reply_text("\n".join(lines) if lines else "No stats yet.")
 
 
 # ---------------- PARAMETER COMMANDS ----------------
@@ -264,21 +319,27 @@ async def process_audio_file(in_path: str, out_path: str, params: dict) -> Tuple
     filters = []
 
     if "speed" in params:
-        filters.append(build_atempo_filters(float(params["speed"])))
+        try:
+            filters.append(build_atempo_filters(float(params["speed"])))
+        except:
+            pass
 
     if "pitch" in params:
-        pf = build_pitch_filter(float(params["pitch"]))
-        if pf:
-            filters.append(pf)
+        try:
+            pf = build_pitch_filter(float(params["pitch"]))
+            if pf:
+                filters.append(pf)
+        except:
+            pass
 
     filter_str = ",".join(filters) if filters else None
 
     cmd = ["ffmpeg", "-y"]
-    if params.get("trim_start"):
+    if params.get("trim_start") is not None:
         cmd += ["-ss", str(params["trim_start"])]
     cmd += ["-i", in_path]
 
-    if params.get("trim_end"):
+    if params.get("trim_end") is not None:
         cmd += ["-to", str(params["trim_end"])]
 
     if filter_str:
@@ -343,7 +404,8 @@ async def preview_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     params = get_last_params_for_chat(chat)
     params_preview = params.copy()
-    params_preview["trim_start"] = 0
+    if params_preview.get("trim_start") is None:
+        params_preview["trim_start"] = 0
     params_preview["trim_end"] = 10
 
     fd, out_path = mkstemp(suffix=".mp3")
@@ -360,16 +422,19 @@ async def preview_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     cs = ensure_chat_settings(chat)
     performer = cs.get("artist")
+    title = cs.get("song_title")
     thumb = cs.get("picture_file_id")
 
     with open(out_path, "rb") as f:
-        await ctx.bot.send_audio(
-            chat_id=chat,
-            audio=f,
-            performer=performer,
-            thumb=thumb,
-            filename="preview.mp3"
-        )
+        kwargs = {}
+        if performer:
+            kwargs["performer"] = performer
+        if title:
+            kwargs["title"] = title
+        if thumb:
+            await ctx.bot.send_audio(chat_id=chat, audio=InputFile(f, filename="preview.mp3"), thumb=thumb, **kwargs)
+        else:
+            await ctx.bot.send_audio(chat_id=chat, audio=InputFile(f, filename="preview.mp3"), **kwargs)
 
 
 async def apply_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -395,21 +460,27 @@ async def apply_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Error: {err}")
         return
 
-    stats["total_processed"] += 1
+    stats["total_processed"] = stats.get("total_processed", 0) + 1
+    uid = str(chat)
+    stats.setdefault("by_user", {})
+    stats["by_user"][uid] = stats["by_user"].get(uid, 0) + 1
     save_json(STATS_FILE, stats)
 
     cs = ensure_chat_settings(chat)
     performer = cs.get("artist")
+    title = cs.get("song_title")
     thumb = cs.get("picture_file_id")
 
     with open(out_path, "rb") as f:
-        await ctx.bot.send_audio(
-            chat_id=chat,
-            audio=f,
-            performer=performer,
-            thumb=thumb,
-            filename=f"edited.{fmt}"
-        )
+        kwargs = {}
+        if performer:
+            kwargs["performer"] = performer
+        if title:
+            kwargs["title"] = title
+        if thumb:
+            await ctx.bot.send_audio(chat_id=chat, audio=InputFile(f, filename=f"edited.{fmt}"), thumb=thumb, **kwargs)
+        else:
+            await ctx.bot.send_audio(chat_id=chat, audio=InputFile(f, filename=f"edited.{fmt}"), **kwargs)
 
 
 async def post_to_channel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -420,7 +491,7 @@ async def post_to_channel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Send audio first.")
         return
 
-    if not settings["channels"]:
+    if not settings.get("channels"):
         await update.message.reply_text("No channels connected.")
         return
 
@@ -442,18 +513,38 @@ async def post_to_channel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     cs = ensure_chat_settings(chat)
     performer = cs.get("artist")
+    title = cs.get("song_title")
     thumb = cs.get("picture_file_id")
 
     with open(out_path, "rb") as f:
-        await ctx.bot.send_audio(
-            chat_id=int(channel_id),
-            audio=f,
-            performer=performer,
-            thumb=thumb,
-            filename=f"channel_post.{fmt}"
-        )
+        await ctx.bot.send_audio(chat_id=int(channel_id), audio=InputFile(f, filename=f"channel_post.{fmt}"), thumb=thumb, performer=performer, title=title)
 
     await update.message.reply_text("Posted.")
+
+
+# ---------- NEW: upload_local_thumb_cmd ----------
+# Useful for testing: upload a local image inside the container and store its file_id
+TEST_LOCAL_IMAGE = "/mnt/data/e49ec989-1709-467d-992b-3944189f155c.png"
+
+async def upload_local_thumb_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not os.path.exists(TEST_LOCAL_IMAGE):
+        await update.message.reply_text(f"Local test image not found at {TEST_LOCAL_IMAGE}")
+        return
+    try:
+        with open(TEST_LOCAL_IMAGE, "rb") as f:
+            sent = await ctx.bot.send_photo(chat_id=update.effective_chat.id, photo=f)
+        fid = sent.photo[-1].file_id
+        cs = ensure_chat_settings(update.effective_chat.id)
+        cs["picture_file_id"] = fid
+        save_json(SETTINGS_FILE, settings)
+        # try to delete helper message (best-effort)
+        try:
+            await ctx.bot.delete_message(chat_id=update.effective_chat.id, message_id=sent.message_id)
+        except:
+            pass
+        await update.message.reply_text("Local test image uploaded and saved as album art.")
+    except Exception as e:
+        await update.message.reply_text(f"Failed to upload local image: {e}")
 
 
 # ========== wiring & main ==========
