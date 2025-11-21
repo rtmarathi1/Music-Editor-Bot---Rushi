@@ -1,9 +1,11 @@
 # music_editor_fullbot.py
 """
-Music Editor Full Bot
-- Requires: python-telegram-bot >= 20.5 (tested with 22.5), aiofiles, ffmpeg on PATH
-- Set BOT_TOKEN env var before running.
-- Recommended to run as a Background Worker on Render (app.run_polling()).
+Music Editor Full Bot — Final corrected version.
+
+Notes:
+- Set BOT_TOKEN environment variable before running.
+- Prefer running as a Background Worker (polling).
+- Ensure ffmpeg is installed in the container.
 """
 
 import os
@@ -31,7 +33,7 @@ CONCURRENT_JOBS = 2
 JOB_TIMEOUT_SECONDS = 90
 job_semaphore = asyncio.Semaphore(CONCURRENT_JOBS)
 
-# local test image path (optional)
+# optional test image path inside container
 TEST_LOCAL_IMAGE = "/mnt/data/e49ec989-1709-467d-992b-3944189f155c.png"
 
 # ---------------- JSON HELPERS ----------------
@@ -69,8 +71,8 @@ def ensure_chat_settings(chat_id):
 
 # ---------------- UTILITIES ----------------
 async def save_file_from_telegram(file_obj, dest_path: str):
-    """Download Telegram File to dest_path, compatible across PTB versions."""
     f = await file_obj.get_file()
+    # compatibility across PTB versions
     if hasattr(f, "download_to_drive"):
         await f.download_to_drive(dest_path)
     else:
@@ -79,7 +81,6 @@ async def save_file_from_telegram(file_obj, dest_path: str):
 
 
 def ffmpeg_run(cmd: list, timeout: int = JOB_TIMEOUT_SECONDS) -> Tuple[int, bytes, bytes]:
-    """Synchronous ffmpeg run (safe to call in executor)."""
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         out, err = proc.communicate(timeout=timeout)
@@ -121,12 +122,12 @@ def build_pitch_filter(semitones: float) -> Optional[str]:
 def format_time_arg(value: str) -> Optional[str]:
     if value is None:
         return None
-    value = str(value).strip()
+    v = str(value).strip()
     try:
-        float(value)
-        return value
+        float(v)
+        return v
     except:
-        return value
+        return v
 
 
 # ---------------- TELEGRAM RETRY HELPER ----------------
@@ -201,7 +202,7 @@ async def connect_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         alias = ctx.args[0].strip()
         try:
             chat = await ctx.bot.get_chat(alias)
-        except Exception as e:
+        except Exception:
             await _retry_telegram_call(update.message.reply_text, "Cannot find channel.")
             return
         settings["channels"][str(chat.id)] = {"title": chat.title, "username": chat.username}
@@ -336,7 +337,72 @@ def file_size_ok(path: str) -> bool:
         return False
 
 
-# ---------------- UPLOAD HANDLERS ----------------
+# ---------------- MEDIA HANDLERS ----------------
+async def photo_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles photo messages and image file documents.
+    If user previously ran /setpic, this saves the photo as album art.
+    Otherwise, it stores photo as album art by default.
+    """
+    try:
+        awaiting_chat = ctx.user_data.get('awaiting_pic_for_chat')
+        # photo message
+        if update.message.photo:
+            photo = update.message.photo[-1]
+            file_id = photo.file_id
+            if awaiting_chat and awaiting_chat == update.effective_chat.id:
+                cs = ensure_chat_settings(awaiting_chat)
+                cs["picture_file_id"] = file_id
+                save_json(SETTINGS_FILE, settings)
+                ctx.user_data.pop('awaiting_pic_for_chat', None)
+                await _retry_telegram_call(update.message.reply_text, "Album art saved.")
+                return
+            # otherwise just save for this chat
+            cs = ensure_chat_settings(update.effective_chat.id)
+            cs["picture_file_id"] = file_id
+            save_json(SETTINGS_FILE, settings)
+            await _retry_telegram_call(update.message.reply_text, "Album art saved.")
+            return
+
+        # document that is an image file (some clients upload images as documents)
+        if update.message.document and update.message.document.mime_type and update.message.document.mime_type.startswith("image/"):
+            # download and re-upload as photo to obtain file_id
+            fd, tmp = mkstemp()
+            os.close(fd)
+            try:
+                await save_file_from_telegram(update.message.document, tmp)
+                with open(tmp, "rb") as fh:
+                    sent = await _retry_telegram_call(ctx.bot.send_photo, chat_id=update.effective_chat.id, photo=fh)
+                # cleanup bot-sent message (optional)
+                try:
+                    await ctx.bot.delete_message(chat_id=update.effective_chat.id, message_id=sent.message_id)
+                except:
+                    pass
+                file_id = sent.photo[-1].file_id
+                cs = ensure_chat_settings(update.effective_chat.id)
+                cs["picture_file_id"] = file_id
+                save_json(SETTINGS_FILE, settings)
+                await _retry_telegram_call(update.message.reply_text, "Album art saved (from uploaded image).")
+            finally:
+                try:
+                    os.remove(tmp)
+                except:
+                    pass
+            return
+
+        # channel forward connection when awaiting
+        awaiting_channel = ctx.user_data.get('awaiting_channel_connect')
+        if awaiting_channel and update.message.forward_from_chat and update.message.forward_from_chat.type == "channel":
+            channel = update.message.forward_from_chat
+            settings["channels"][str(channel.id)] = {"title": channel.title, "username": channel.username}
+            save_json(SETTINGS_FILE, settings)
+            ctx.user_data.pop('awaiting_channel_connect', None)
+            await _retry_telegram_call(update.message.reply_text, f"Channel registered: {channel.title}")
+            return
+    except Exception as e:
+        print("photo_handler error:", e, flush=True)
+
+
 async def handle_audio_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         msg = update.message
@@ -374,6 +440,22 @@ async def handle_audio_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+# Generic router for document messages: call photo or audio handlers based on mime-type
+async def document_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        msg = update.message
+        if not msg or not msg.document:
+            return
+        mim = msg.document.mime_type or ""
+        if mim.startswith("image/"):
+            await photo_handler(update, ctx)
+        elif mim.startswith("audio/"):
+            await handle_audio_upload(update, ctx)
+    except Exception as e:
+        print("document_router error:", e, flush=True)
+
+
+# ---------------- PREVIEW / APPLY / POST ----------------
 async def preview_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         chat = update.effective_chat.id
@@ -513,40 +595,7 @@ async def post_to_channel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
 
 
-# ---------------- DOCUMENT ROUTER (safe) ----------------
-async def document_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """
-    Generic router for messages that may contain document attachments.
-    We only handle:
-    - image/* documents (save as album art if awaiting)
-    - audio/* documents (pass to audio handler)
-    Other documents are ignored.
-    This avoids relying on filters.Document (incompatible across PTB versions).
-    """
-    try:
-        msg = update.message
-        if not msg:
-            return
-
-        # if it's a document...
-        doc = msg.document
-        if not doc:
-            return
-
-        mim = doc.mime_type or ""
-        if mim.startswith("image/"):
-            # route to photo_handler path that expects update with document
-            # reuse photo_handler logic by calling it
-            await photo_handler(update, ctx)
-            return
-        if mim.startswith("audio/"):
-            await handle_audio_upload(update, ctx)
-            return
-    except Exception as e:
-        print("document_router error:", e, flush=True)
-
-
-# ---------------- UPLOAD LOCAL THUMB (testing) ----------------
+# Useful testing command: upload local image inside container and save its file_id
 async def upload_local_thumb_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not os.path.exists(TEST_LOCAL_IMAGE):
         await _retry_telegram_call(update.message.reply_text, f"Local test image not found at {TEST_LOCAL_IMAGE}")
@@ -597,11 +646,20 @@ def main():
     app.add_handler(CommandHandler("apply", apply_cmd))
     app.add_handler(CommandHandler("post_to_channel", post_to_channel_cmd))
 
-    # media handlers: register specific ones first
+    # media handlers
+    # 1) photos
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    # 2) voice/audio messages
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_audio_upload))
-    # generic document router (will inspect mime and call appropriate routines)
-    app.add_handler(MessageHandler(filters.ALL, document_router))
+
+    # 3) document router: try to add Document filter handler, but wrap in try/except
+    # Some PTB versions have filter internals incompatible when used in combinations; adding safely.
+    try:
+        # This will work on most PTB versions
+        app.add_handler(MessageHandler(filters.Document, document_router))
+    except Exception as e:
+        # fallback: Do not add Document handler if unsupported; document updates may still arrive to the VOICE/AUDIO handlers
+        print("Warning: filters.Document not usable in this environment; document_router not registered. Exception:", e, flush=True)
 
     print("Starting Music Editor Full Bot...", flush=True)
     try:
