@@ -107,12 +107,9 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Usage:
-"
-        "- Send an image to set it as cover.
-"
-        "- Then send an MP3 (audio/document) to embed the cover into the file and get processed file back.
-"
-        "- You can also send /setmeta Title - Artist to set metadata before uploading the audio."
+- Send an image to set it as cover.
+- Then send an MP3 (audio/document) to embed the cover into the file.
+- You can also send /setmeta title - artist to set metadata before uploading the audio.""
     )
 
 
