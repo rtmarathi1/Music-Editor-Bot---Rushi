@@ -1,9 +1,12 @@
 # music_editor_fullbot.py
+# Save/replace your old file with this.
 # Requirements:
 #   pip install python-telegram-bot==22.5 aiofiles Pillow mutagen
 #   ffmpeg available on PATH
 #
-# Usage: set BOT_TOKEN env var and run: python music_editor_fullbot.py
+# Usage:
+#   export BOT_TOKEN="123:ABC..."
+#   python music_editor_fullbot.py
 
 import os
 import json
@@ -92,6 +95,7 @@ def build_pitch_filter(semitones: float) -> Optional[str]:
     if semitones == 0:
         return None
     factor = 2 ** (semitones / 12.0)
+    # change sample rate and resample back to 44100
     return f"asetrate=44100*{factor},aresample=44100"
 
 def format_time_arg(value: str) -> Optional[str]:
@@ -357,13 +361,11 @@ async def _generate_mp3_with_cover_and_send(update, ctx, in_path, params, previe
     fd_out, out_mp3 = mkstemp(suffix=".mp3")
     os.close(fd_out)
 
-    # for preview we will simply convert to mp3 and trim to 10s using ffmpeg filters
     params_local = params.copy()
     if preview:
         params_local["trim_start"] = params_local.get("trim_start", 0)
         params_local["trim_end"] = params_local.get("trim_end", 10)
 
-    # produce mp3 via ensure_mp3_with_cover (which embeds cover if provided)
     cover_path = None
     if picture_file_id:
         try:
@@ -376,17 +378,16 @@ async def _generate_mp3_with_cover_and_send(update, ctx, in_path, params, previe
             except: pass
             cover_path = None
 
-    # If filters (speed/pitch/trim) are present, run process_audio_file first to a temp file, then convert+w/embed
     fd_proc, proc_path = mkstemp()
     os.close(fd_proc)
     try:
         ok, err = await process_audio_file(in_path, proc_path, params_local)
         if not ok:
             raise RuntimeError("Processing failed: " + err)
-        # now convert proc_path -> mp3 & embed cover
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, ensure_mp3_with_cover, proc_path, out_mp3, cover_path, None, artist)
         with open(out_mp3, "rb") as f:
+            # send as audio (no thumb param) — Telegram will use embedded ID3 cover
             await ctx.bot.send_audio(chat_id=chat, audio=InputFile(f, filename="preview.mp3"), performer=artist)
     finally:
         try: os.remove(proc_path)
@@ -464,10 +465,10 @@ async def apply_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 with open(out_path, "rb") as f:
                     await ctx.bot.send_audio(chat_id=chat, audio=InputFile(f, filename=f"edited.{fmt}"), performer=artist)
             else:
-                # create mp3 copy with cover for the "music" variant, and send original as document too
                 fd_mp3, out_mp3 = mkstemp(suffix=".mp3")
                 os.close(fd_mp3)
                 try:
+                    # produce mp3 with cover for 'music' variant
                     await asyncio.get_event_loop().run_in_executor(None, ensure_mp3_with_cover, out_path, out_mp3, cover_path, None, artist)
                     with open(out_mp3, "rb") as f:
                         await ctx.bot.send_audio(chat_id=chat, audio=InputFile(f, filename="edited.mp3"), performer=artist)
@@ -583,7 +584,6 @@ async def generic_message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE
             ctx.user_data.pop('awaiting_pic_for_chat', None)
             await msg.reply_text("Album art saved (photo).")
             return
-        # otherwise ignore or optionally acknowledge photo
         return
 
     # documents (images / audio / video)
@@ -597,7 +597,6 @@ async def generic_message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE
             ctx.user_data.pop('awaiting_pic_for_chat', None)
             await msg.reply_text("Album art saved (uploaded image).")
             return
-        # treat audio/video docs as upload
         if mime.startswith("audio/") or mime.startswith("video/"):
             await handle_audio_upload(update, ctx, msg.document)
             return
@@ -619,7 +618,6 @@ async def generic_message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE
         await handle_audio_upload(update, ctx, msg.video)
         return
 
-    # fallback (text etc) - do nothing
     return
 
 # ---------- wiring ----------
@@ -650,8 +648,21 @@ def main():
     # single generic message handler — avoids problematic filter combinations
     app.add_handler(MessageHandler(filters.ALL, generic_message_handler))
 
-    print("Starting Music Editor Full Bot...")
-    app.run_polling()
+    # Delete webhook if any (prevents getUpdates conflict) BEFORE polling starts
+    try:
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
+        print("Deleted existing webhook (if any).")
+    except Exception as e:
+        print("Warning: could not delete webhook at startup:", e)
+
+    print("Starting Music Editor Full Bot (polling)...")
+    try:
+        # run_polling will block and manage the event loop
+        app.run_polling(drop_pending_updates=True)
+    except Exception as e:
+        print("Bot crashed:", e)
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()
