@@ -150,7 +150,6 @@ async def set_artist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Artist set to: {cs['artist']}")
 
 
-# ---------- NEW: set_title handler ----------
 async def set_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Usage: /settitle <song name>"""
     if not ctx.args:
@@ -211,7 +210,7 @@ async def photo_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Channel registered: {channel.title}")
         return
 
-    # If not awaited, ignore or allow quick save from a photo message
+    # If not awaited, allow quick save from a photo message
     if update.message.photo:
         photo = update.message.photo[-1]
         cs = ensure_chat_settings(update.effective_chat.id)
@@ -537,7 +536,6 @@ async def upload_local_thumb_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         cs = ensure_chat_settings(update.effective_chat.id)
         cs["picture_file_id"] = fid
         save_json(SETTINGS_FILE, settings)
-        # try to delete helper message (best-effort)
         try:
             await ctx.bot.delete_message(chat_id=update.effective_chat.id, message_id=sent.message_id)
         except:
@@ -555,7 +553,7 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # commands
+    # command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("setartist", set_artist))
@@ -574,12 +572,13 @@ def main():
     app.add_handler(CommandHandler("post_to_channel", post_to_channel_cmd))
     app.add_handler(CommandHandler("upload_local_thumb", upload_local_thumb_cmd))
 
-    # media handlers
-    # Accept PHOTO messages and Documents (images) — photo_handler will inspect the message/document
-    app.add_handler(MessageHandler(filters.PHOTO | filters.Document, photo_handler))
+    # media handlers — register separately to avoid merging Document with other filters
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    app.add_handler(MessageHandler(filters.Document, photo_handler))
 
-    # Accept VOICE, AUDIO, or DOCUMENT messages and let the handler inspect mime/type
-    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.Document, handle_audio_upload))
+    app.add_handler(MessageHandler(filters.VOICE, handle_audio_upload))
+    app.add_handler(MessageHandler(filters.AUDIO, handle_audio_upload))
+    app.add_handler(MessageHandler(filters.Document, handle_audio_upload))
 
     print("Starting Music Editor Full Bot...")
     app.run_polling()
