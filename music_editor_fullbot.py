@@ -1,14 +1,10 @@
 """
-Fixed Music Editor Full Bot
+Fixed Music Editor Full Bot (patched to avoid PosixPath -> InputFile bug)
 - Compatible with python-telegram-bot v22.x
 - Embeds cover art into MP3 (ID3 APIC) using mutagen
-- Accepts any image size and resizes to a square-ish thumbnail (maintains aspect)
-- Avoids using the 'thumb' argument to send_audio (some PTB wrappers remove it)
+- Accepts images, resizes them, and stores per-user cover
+- Opens files as binary streams when sending to Telegram (fixes AttributeError: 'PosixPath' object has no attribute 'read')
 - Uses Application.builder().post_init(on_startup).build()
-- Handles audio uploads (audio, voice, document) and photo uploads
-
-Drop this file in place of your old `music_editor_fullbot.py`.
-Make sure your requirements include: python-telegram-bot==22.5 mutagen Pillow aiofiles
 """
 
 import os
@@ -42,7 +38,6 @@ logger = logging.getLogger(__name__)
 # ---------- Utilities ----------
 async def save_telegram_file(file_obj, dest_path: Path):
     """Download and save a Telegram file asynchronously."""
-    # file_obj is a telegram.File
     await file_obj.download_to_drive(custom_path=str(dest_path))
     return dest_path
 
@@ -170,6 +165,21 @@ async def setmeta_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(f"Metadata set. Title: {title or 'None'}, Artist: {artist or 'None'}")
 
 
+async def send_document_file(msg, path: Path, filename: str) -> None:
+    """
+    Open file at `path` in binary mode, send it to user as a document with `filename`,
+    then close the file to avoid leaking file descriptors.
+    """
+    f = open(path, "rb")
+    try:
+        await msg.reply_document(document=InputFile(f), filename=filename)
+    finally:
+        try:
+            f.close()
+        except Exception:
+            logger.debug("Failed to close file %s", path)
+
+
 async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle audio/document/voice uploads and embed cover if available."""
     msg = update.message
@@ -219,11 +229,11 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             except Exception as e:
                 logger.exception("Embed failed: %s", e)
                 await msg.reply_text("Failed to embed cover. Sending original file instead.")
-                await msg.reply_document(document=InputFile(tmp_audio_in), filename=filename)
+                await send_document_file(msg, tmp_audio_in, filename)
                 return
 
             # send resulting mp3 as document (so clients download the file and see embedded cover)
-            await msg.reply_document(document=InputFile(tmp_audio_in), filename=filename)
+            await send_document_file(msg, tmp_audio_in, filename)
             await msg.reply_text("Done — cover embedded.")
             return
 
@@ -235,7 +245,7 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 await msg.reply_text("No cover set. Sending back original file.")
             else:
                 await msg.reply_text("Unable to process file; sending original back.")
-            await msg.reply_document(document=InputFile(tmp_audio_in), filename=filename)
+            await send_document_file(msg, tmp_audio_in, filename)
             return
 
     except Exception as exc:
