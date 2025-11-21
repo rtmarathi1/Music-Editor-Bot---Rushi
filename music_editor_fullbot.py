@@ -1,10 +1,10 @@
 # music_editor_fullbot.py
 """
-Music Editor Full Bot — Final corrected version.
+Final Music Editor Full Bot — ready to replace existing file.
 
 Notes:
 - Set BOT_TOKEN environment variable before running.
-- Prefer running as a Background Worker (polling).
+- Prefer running as a Background Worker (polling) on Render.
 - Ensure ffmpeg is installed in the container.
 """
 
@@ -34,7 +34,7 @@ JOB_TIMEOUT_SECONDS = 90
 job_semaphore = asyncio.Semaphore(CONCURRENT_JOBS)
 
 # optional test image path inside container
-TEST_LOCAL_IMAGE = "/mnt/data/e49ec989-1709-467d-992b-3944189f155c.png"
+TEST_LOCAL_IMAGE = os.environ.get("TEST_LOCAL_IMAGE", "/mnt/data/e49ec989-1709-467d-992b-3944189f155c.png")
 
 # ---------------- JSON HELPERS ----------------
 def load_json(path, default):
@@ -366,14 +366,12 @@ async def photo_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         # document that is an image file (some clients upload images as documents)
         if update.message.document and update.message.document.mime_type and update.message.document.mime_type.startswith("image/"):
-            # download and re-upload as photo to obtain file_id
             fd, tmp = mkstemp()
             os.close(fd)
             try:
                 await save_file_from_telegram(update.message.document, tmp)
                 with open(tmp, "rb") as fh:
                     sent = await _retry_telegram_call(ctx.bot.send_photo, chat_id=update.effective_chat.id, photo=fh)
-                # cleanup bot-sent message (optional)
                 try:
                     await ctx.bot.delete_message(chat_id=update.effective_chat.id, message_id=sent.message_id)
                 except:
@@ -647,18 +645,12 @@ def main():
     app.add_handler(CommandHandler("post_to_channel", post_to_channel_cmd))
 
     # media handlers
-    # 1) photos
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
-    # 2) voice/audio messages
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_audio_upload))
 
-    # 3) document router: try to add Document filter handler, but wrap in try/except
-    # Some PTB versions have filter internals incompatible when used in combinations; adding safely.
     try:
-        # This will work on most PTB versions
         app.add_handler(MessageHandler(filters.Document, document_router))
     except Exception as e:
-        # fallback: Do not add Document handler if unsupported; document updates may still arrive to the VOICE/AUDIO handlers
         print("Warning: filters.Document not usable in this environment; document_router not registered. Exception:", e, flush=True)
 
     print("Starting Music Editor Full Bot...", flush=True)
