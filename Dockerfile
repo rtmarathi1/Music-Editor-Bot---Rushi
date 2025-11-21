@@ -1,0 +1,19 @@
+# Dockerfile for Music Editor Bot
+FROM python:3.11-slim
+
+# Install ffmpeg + libs needed by Pillow
+RUN apt-get update && \
+    apt-get install -y ffmpeg libsndfile1 libjpeg62-turbo-dev zlib1g-dev --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy project files
+COPY . /app
+
+RUN pip install --upgrade pip
+RUN pip install -r requirements.txt
+
+ENV BOT_TOKEN="replace_me"
+
+CMD ["python", "music_editor_fullbot.py"]
