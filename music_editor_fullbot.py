@@ -456,7 +456,7 @@ async def post_to_channel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Posted.")
 
 
-# ---------------- MAIN ----------------
+# ========== wiring & main ==========
 def main():
     if not BOT_TOKEN:
         print("ERROR: BOT_TOKEN not set.")
@@ -464,9 +464,11 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("setartist", set_artist))
+    app.add_handler(CommandHandler("settitle", set_title))
     app.add_handler(CommandHandler("setpic", set_pic_command))
     app.add_handler(CommandHandler("connect_channel", connect_channel))
     app.add_handler(CommandHandler("stats", stats_cmd))
@@ -479,14 +481,14 @@ def main():
     app.add_handler(CommandHandler("preview", preview_cmd))
     app.add_handler(CommandHandler("apply", apply_cmd))
     app.add_handler(CommandHandler("post_to_channel", post_to_channel_cmd))
+    app.add_handler(CommandHandler("upload_local_thumb", upload_local_thumb_cmd))
 
-    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, photo_handler))
+    # media handlers
+    # Accept PHOTO messages and Documents (images) — photo_handler will inspect the message/document
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document, photo_handler))
 
-    app.add_handler(MessageHandler(
-        filters.VOICE | filters.AUDIO |
-        (filters.Document & filters.Document.file_mime_type("audio/.*")),
-        handle_audio_upload
-    ))
+    # Accept VOICE, AUDIO, or DOCUMENT messages and let the handler inspect mime/type
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.Document, handle_audio_upload))
 
     print("Starting Music Editor Full Bot...")
     app.run_polling()
