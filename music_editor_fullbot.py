@@ -1,12 +1,10 @@
 # music_editor_fullbot.py
 """
-Final Music Editor Full Bot — ready to replace existing file.
-
-Notes:
-- Set BOT_TOKEN environment variable before running.
-- If using Render Web Service (not Background Worker) the script will start
-  a tiny HTTP health endpoint bound to PORT (aiohttp). Add aiohttp to requirements.
-- Ensure ffmpeg is installed in the container.
+Minimal robust Music Editor Bot.
+Designed to run as a background worker (no HTTP health server).
+Requirements: python-telegram-bot==22.5 aiofiles Pillow python-dotenv httpx
+Ensure ffmpeg is installed in the container.
+Set BOT_TOKEN env var before running.
 """
 
 import os
@@ -17,20 +15,13 @@ from pathlib import Path
 from tempfile import mkstemp
 from typing import Optional, Tuple
 
-# health server
-try:
-    from aiohttp import web
-    AIOHTTP_AVAILABLE = True
-except Exception:
-    AIOHTTP_AVAILABLE = False
-
 from telegram import Update, InputFile
 from telegram.error import TimedOut, TelegramError
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 )
 
-# ---------------- CONFIG ----------------
+# CONFIG
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 SETTINGS_FILE = "bot_settings.json"
 STATS_FILE = "bot_stats.json"
@@ -40,10 +31,7 @@ CONCURRENT_JOBS = 2
 JOB_TIMEOUT_SECONDS = 90
 job_semaphore = asyncio.Semaphore(CONCURRENT_JOBS)
 
-# optional test image path inside container
-TEST_LOCAL_IMAGE = os.environ.get("TEST_LOCAL_IMAGE", "/mnt/data/e49ec989-1709-467d-992b-3944189f155c.png")
-
-# ---------------- JSON HELPERS ----------------
+# JSON helpers
 def load_json(path, default):
     try:
         with open(path, "r", encoding="utf8") as f:
@@ -72,9 +60,10 @@ def ensure_chat_settings(chat_id):
         }
     return settings["chats"][ks]
 
-# ---------------- UTILITIES ----------------
+# Utilities
 async def save_file_from_telegram(file_obj, dest_path: str):
     f = await file_obj.get_file()
+    # some PTB versions have download_to_drive
     if hasattr(f, "download_to_drive"):
         await f.download_to_drive(dest_path)
     else:
@@ -103,11 +92,9 @@ def build_atempo_filters(factor: float) -> str:
     parts = []
     rem = factor
     while rem > 2.0:
-        parts.append("atempo=2.0")
-        rem /= 2.0
+        parts.append("atempo=2.0"); rem /= 2.0
     while rem < 0.5:
-        parts.append("atempo=0.5")
-        rem /= 0.5
+        parts.append("atempo=0.5"); rem /= 0.5
     parts.append(f"atempo={rem}")
     return ",".join(parts)
 
@@ -122,12 +109,11 @@ def format_time_arg(value: str) -> Optional[str]:
         return None
     v = str(value).strip()
     try:
-        float(v)
-        return v
+        float(v); return v
     except:
         return v
 
-# ---------------- TELEGRAM RETRY HELPER ----------------
+# Telegram retry helper for network blips
 async def _retry_telegram_call(coro_func, *args, retries: int = 2, delay: float = 1.0, **kwargs):
     last_exc = None
     for attempt in range(retries + 1):
@@ -142,51 +128,44 @@ async def _retry_telegram_call(coro_func, *args, retries: int = 2, delay: float 
     if last_exc:
         raise last_exc
 
-# ---------------- COMMAND HANDLERS ----------------
+# Basic commands
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await _retry_telegram_call(update.message.reply_text, "Music Editor Bot ready. Use /help for commands.")
+    await _retry_telegram_call(update.message.reply_text, "Music Editor Bot ready. Use /help.")
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = (
         "Commands:\n"
         "/setartist <name>\n"
         "/settitle <song name>\n"
-        "/setpic\n"
+        "/setpic (send photo after)\n"
         "/connect_channel\n\n"
-        "Editing:\n"
-        "/speed <factor>\n"
-        "/pitch <semitones>\n"
-        "/trim <start> <end>\n"
-        "/convert <format>\n\n"
-        "/preview\n"
-        "/apply\n"
-        "/post_to_channel\n\n"
-        "Other:\n"
-        "/stats\n"
+        "Edit params:\n"
+        "/speed /pitch /trim /convert\n\n"
+        "/preview /apply /post_to_channel\n"
     )
     await _retry_telegram_call(update.message.reply_text, txt)
 
 async def set_artist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
-        await _retry_telegram_call(update.message.reply_text, "Usage: /setartist <artist name>")
+        await _retry_telegram_call(update.message.reply_text, "Usage: /setartist <name>")
         return
     cs = ensure_chat_settings(update.effective_chat.id)
     cs["artist"] = " ".join(ctx.args).strip()
     save_json(SETTINGS_FILE, settings)
-    await _retry_telegram_call(update.message.reply_text, f"Artist set to: {cs['artist']}")
+    await _retry_telegram_call(update.message.reply_text, f"Artist set: {cs['artist']}")
 
 async def set_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
-        await _retry_telegram_call(update.message.reply_text, "Usage: /settitle <song name>")
+        await _retry_telegram_call(update.message.reply_text, "Usage: /settitle <name>")
         return
     cs = ensure_chat_settings(update.effective_chat.id)
     cs["song_title"] = " ".join(ctx.args).strip()
     save_json(SETTINGS_FILE, settings)
-    await _retry_telegram_call(update.message.reply_text, f"Song title set to: {cs['song_title']}")
+    await _retry_telegram_call(update.message.reply_text, f"Title set: {cs['song_title']}")
 
 async def set_pic_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['awaiting_pic_for_chat'] = update.effective_chat.id
-    await _retry_telegram_call(update.message.reply_text, "Send the photo you want as album art (photo or image file).")
+    await _retry_telegram_call(update.message.reply_text, "Send the photo to use as album art (photo or image file).")
 
 async def connect_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if ctx.args:
@@ -201,18 +180,13 @@ async def connect_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _retry_telegram_call(update.message.reply_text, f"Channel connected: {chat.title}")
         return
     ctx.user_data['awaiting_channel_connect'] = True
-    await _retry_telegram_call(update.message.reply_text, "Forward any channel post here to connect it.")
+    await _retry_telegram_call(update.message.reply_text, "Forward a message from the channel here to register it (bot must be admin).")
 
 async def stats_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     t = stats.get("total_processed", 0)
-    by_user = stats.get("by_user", {})
-    top = sorted(by_user.items(), key=lambda x: -x[1])[:10]
-    lines = [f"Total processed audios: {t}", "Top chats:"]
-    for uid, cnt in top:
-        lines.append(f"- {uid}: {cnt}")
-    await _retry_telegram_call(update.message.reply_text, "\n".join(lines) if lines else "No stats yet.")
+    await _retry_telegram_call(update.message.reply_text, f"Total processed: {t}")
 
-# ---------------- EDIT PARAMS ----------------
+# Param helpers
 def set_last_params_for_chat(chat_id, params: dict):
     cs = ensure_chat_settings(chat_id)
     cs["last_edit_params"] = params
@@ -229,7 +203,7 @@ async def speed_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         f = float(ctx.args[0])
     except:
-        await _retry_telegram_call(update.message.reply_text, "Invalid number.")
+        await _retry_telegram_call(update.message.reply_text, "Invalid number")
         return
     params = get_last_params_for_chat(update.effective_chat.id)
     params["speed"] = f
@@ -243,7 +217,7 @@ async def pitch_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         s = float(ctx.args[0])
     except:
-        await _retry_telegram_call(update.message.reply_text, "Invalid number.")
+        await _retry_telegram_call(update.message.reply_text, "Invalid number")
         return
     params = get_last_params_for_chat(update.effective_chat.id)
     params["pitch"] = s
@@ -254,13 +228,11 @@ async def trim_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if len(ctx.args) < 2:
         await _retry_telegram_call(update.message.reply_text, "Usage: /trim <start> <end>")
         return
-    start = format_time_arg(ctx.args[0])
-    end = format_time_arg(ctx.args[1])
+    start = format_time_arg(ctx.args[0]); end = format_time_arg(ctx.args[1])
     params = get_last_params_for_chat(update.effective_chat.id)
-    params["trim_start"] = start
-    params["trim_end"] = end
+    params["trim_start"] = start; params["trim_end"] = end
     set_last_params_for_chat(update.effective_chat.id, params)
-    await _retry_telegram_call(update.message.reply_text, f"Trim set: {start} -> {end}")
+    await _retry_telegram_call(update.message.reply_text, f"Trim: {start} -> {end}")
 
 async def convert_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
@@ -270,23 +242,19 @@ async def convert_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     params = get_last_params_for_chat(update.effective_chat.id)
     params["convert_to"] = fmt
     set_last_params_for_chat(update.effective_chat.id, params)
-    await _retry_telegram_call(update.message.reply_text, f"Format set: {fmt}")
+    await _retry_telegram_call(update.message.reply_text, f"Format: {fmt}")
 
-# ---------------- PROCESSING ----------------
+# Processing
 async def process_audio_file(in_path: str, out_path: str, params: dict) -> Tuple[bool, str]:
     filters_list = []
     if "speed" in params:
-        try:
-            filters_list.append(build_atempo_filters(float(params["speed"])))
-        except:
-            pass
+        try: filters_list.append(build_atempo_filters(float(params["speed"])))
+        except: pass
     if "pitch" in params:
         try:
             pf = build_pitch_filter(float(params["pitch"]))
-            if pf:
-                filters_list.append(pf)
-        except:
-            pass
+            if pf: filters_list.append(pf)
+        except: pass
     filter_str = ",".join(filters_list) if filters_list else None
 
     cmd = ["ffmpeg", "-y"]
@@ -313,12 +281,10 @@ async def process_audio_file(in_path: str, out_path: str, params: dict) -> Tuple
     return (rc == 0, err.decode(errors="ignore"))
 
 def file_size_ok(path: str) -> bool:
-    try:
-        return Path(path).stat().st_size <= MAX_FILE_SIZE_BYTES
-    except:
-        return False
+    try: return Path(path).stat().st_size <= MAX_FILE_SIZE_BYTES
+    except: return False
 
-# ---------------- MEDIA HANDLERS ----------------
+# Media handlers
 async def photo_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         awaiting_chat = ctx.user_data.get('awaiting_pic_for_chat')
@@ -343,22 +309,17 @@ async def photo_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             os.close(fd)
             try:
                 await save_file_from_telegram(update.message.document, tmp)
+                # upload to Telegram and capture file_id
                 with open(tmp, "rb") as fh:
                     sent = await _retry_telegram_call(ctx.bot.send_photo, chat_id=update.effective_chat.id, photo=fh)
-                try:
-                    await ctx.bot.delete_message(chat_id=update.effective_chat.id, message_id=sent.message_id)
-                except:
-                    pass
                 file_id = sent.photo[-1].file_id
                 cs = ensure_chat_settings(update.effective_chat.id)
                 cs["picture_file_id"] = file_id
                 save_json(SETTINGS_FILE, settings)
                 await _retry_telegram_call(update.message.reply_text, "Album art saved (from uploaded image).")
             finally:
-                try:
-                    os.remove(tmp)
-                except:
-                    pass
+                try: os.remove(tmp)
+                except: pass
             return
 
         awaiting_channel = ctx.user_data.get('awaiting_channel_connect')
@@ -376,10 +337,8 @@ async def handle_audio_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         msg = update.message
         file_obj = None
-        if msg.voice:
-            file_obj = msg.voice
-        elif msg.audio:
-            file_obj = msg.audio
+        if msg.voice: file_obj = msg.voice
+        elif msg.audio: file_obj = msg.audio
         elif msg.document and msg.document.mime_type and msg.document.mime_type.startswith("audio/"):
             file_obj = msg.document
 
@@ -392,15 +351,13 @@ async def handle_audio_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await save_file_from_telegram(file_obj, in_path)
 
         if not file_size_ok(in_path):
-            try:
-                os.remove(in_path)
-            except:
-                pass
-            await _retry_telegram_call(update.message.reply_text, "File too large. Limit ~30 MB.")
+            try: os.remove(in_path)
+            except: pass
+            await _retry_telegram_call(update.message.reply_text, "File too large (~30MB limit).")
             return
 
         ctx.user_data["last_uploaded_audio"] = in_path
-        await _retry_telegram_call(update.message.reply_text, "Audio received. Use /preview, /apply, or /post_to_channel.")
+        await _retry_telegram_call(update.message.reply_text, "Audio received. Use /preview, /apply, /post_to_channel.")
     except Exception as e:
         print("handle_audio_upload error:", e, flush=True)
         try:
@@ -421,7 +378,7 @@ async def document_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print("document_router error:", e, flush=True)
 
-# ---------------- PREVIEW / APPLY / POST ----------------
+# Preview / Apply / Post
 async def preview_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         chat = update.effective_chat.id
@@ -431,12 +388,10 @@ async def preview_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         params = get_last_params_for_chat(chat).copy()
-        if params.get("trim_start") is None:
-            params["trim_start"] = 0
+        if params.get("trim_start") is None: params["trim_start"] = 0
         params["trim_end"] = 10
 
-        fd, out_path = mkstemp(suffix=".mp3")
-        os.close(fd)
+        fd, out_path = mkstemp(suffix=".mp3"); os.close(fd)
         await _retry_telegram_call(update.message.reply_text, "Generating preview...")
 
         async with job_semaphore:
@@ -449,12 +404,9 @@ async def preview_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         cs = ensure_chat_settings(chat)
-        performer = cs.get("artist")
-        title = cs.get("song_title")
-
+        performer = cs.get("artist"); title = cs.get("song_title")
         try:
             with open(out_path, "rb") as f:
-                # Note: removed thumb param due to PTB wrapper differences
                 await _retry_telegram_call(ctx.bot.send_audio, chat_id=chat, audio=InputFile(f, filename="preview.mp3"), performer=performer, title=title)
         except Exception:
             await _retry_telegram_call(ctx.bot.send_document, chat_id=chat, document=InputFile(out_path, filename="preview.mp3"))
@@ -463,10 +415,8 @@ async def preview_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except: pass
     except Exception as e:
         print("preview_cmd error:", e, flush=True)
-        try:
-            await _retry_telegram_call(update.message.reply_text, "Preview failed due to internal error.")
-        except:
-            pass
+        try: await _retry_telegram_call(update.message.reply_text, "Preview failed due to internal error.")
+        except: pass
 
 async def apply_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
@@ -478,8 +428,7 @@ async def apply_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         params = get_last_params_for_chat(chat)
         fmt = params.get("convert_to", "mp3")
-        fd, out_path = mkstemp(suffix=f".{fmt}")
-        os.close(fd)
+        fd, out_path = mkstemp(suffix=f".{fmt}"); os.close(fd)
         await _retry_telegram_call(update.message.reply_text, "Processing full file...")
 
         async with job_semaphore:
@@ -492,15 +441,11 @@ async def apply_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         stats["total_processed"] = stats.get("total_processed", 0) + 1
-        uid = str(chat)
-        stats.setdefault("by_user", {})
+        uid = str(chat); stats.setdefault("by_user", {})
         stats["by_user"][uid] = stats["by_user"].get(uid, 0) + 1
         save_json(STATS_FILE, stats)
 
-        cs = ensure_chat_settings(chat)
-        performer = cs.get("artist")
-        title = cs.get("song_title")
-
+        cs = ensure_chat_settings(chat); performer = cs.get("artist"); title = cs.get("song_title")
         try:
             with open(out_path, "rb") as f:
                 await _retry_telegram_call(ctx.bot.send_audio, chat_id=chat, audio=InputFile(f, filename=f"edited.{fmt}"), performer=performer, title=title)
@@ -511,10 +456,8 @@ async def apply_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except: pass
     except Exception as e:
         print("apply_cmd error:", e, flush=True)
-        try:
-            await _retry_telegram_call(update.message.reply_text, "Processing failed due to internal error.")
-        except:
-            pass
+        try: await _retry_telegram_call(update.message.reply_text, "Processing failed due to internal error.")
+        except: pass
 
 async def post_to_channel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
@@ -526,12 +469,10 @@ async def post_to_channel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not settings.get("channels"):
             await _retry_telegram_call(update.message.reply_text, "No channels connected.")
             return
-
         channel_id = list(settings["channels"].keys())[0]
         params = get_last_params_for_chat(chat)
         fmt = params.get("convert_to", "mp3")
-        fd, out_path = mkstemp(suffix=f".{fmt}")
-        os.close(fd)
+        fd, out_path = mkstemp(suffix=f".{fmt}"); os.close(fd)
         await _retry_telegram_call(update.message.reply_text, "Posting to channel...")
         async with job_semaphore:
             ok, err = await process_audio_file(in_path, out_path, params)
@@ -540,11 +481,7 @@ async def post_to_channel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             try: os.remove(out_path)
             except: pass
             return
-
-        cs = ensure_chat_settings(chat)
-        performer = cs.get("artist")
-        title = cs.get("song_title")
-
+        cs = ensure_chat_settings(chat); performer = cs.get("artist"); title = cs.get("song_title")
         try:
             with open(out_path, "rb") as f:
                 await _retry_telegram_call(ctx.bot.send_audio, chat_id=int(channel_id), audio=InputFile(f, filename=f"channel_post.{fmt}"), performer=performer, title=title)
@@ -556,53 +493,13 @@ async def post_to_channel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except: pass
     except Exception as e:
         print("post_to_channel_cmd error:", e, flush=True)
-        try:
-            await _retry_telegram_call(update.message.reply_text, "Posting failed due to internal error.")
-        except:
-            pass
+        try: await _retry_telegram_call(update.message.reply_text, "Posting failed due to internal error.")
+        except: pass
 
-# Useful testing command: upload local image inside container and save its file_id
-async def upload_local_thumb_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not os.path.exists(TEST_LOCAL_IMAGE):
-        await _retry_telegram_call(update.message.reply_text, f"Local test image not found at {TEST_LOCAL_IMAGE}")
-        return
-    try:
-        with open(TEST_LOCAL_IMAGE, "rb") as f:
-            sent = await _retry_telegram_call(ctx.bot.send_photo, chat_id=update.effective_chat.id, photo=f)
-        fid = sent.photo[-1].file_id
-        cs = ensure_chat_settings(update.effective_chat.id)
-        cs["picture_file_id"] = fid
-        save_json(SETTINGS_FILE, settings)
-        try:
-            await ctx.bot.delete_message(chat_id=update.effective_chat.id, message_id=sent.message_id)
-        except:
-            pass
-        await _retry_telegram_call(update.message.reply_text, "Local test image uploaded and saved as album art.")
-    except Exception as e:
-        print("upload_local_thumb_cmd error:", e, flush=True)
-        await _retry_telegram_call(update.message.reply_text, f"Failed to upload local image: {e}")
-
-# ---------------- HEALTH SERVER ----------------
-async def start_health_server():
-    if not AIOHTTP_AVAILABLE:
-        print("aiohttp not available; health server will not start.", flush=True)
-        return
-    async def handle(request):
-        return web.Response(text="ok")
-    app = web.Application()
-    app.add_routes([web.get("/", handle), web.get("/health", handle)])
-    port = int(os.environ.get("PORT", "8080"))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    print(f"Health server started on 0.0.0.0:{port}", flush=True)
-
-# ---------------- WIRING & MAIN ----------------
+# Wiring & main
 def main():
     if not BOT_TOKEN:
-        print("ERROR: BOT_TOKEN not set. Exiting.", flush=True)
-        return
+        print("ERROR: BOT_TOKEN not set. Exiting.", flush=True); return
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -614,9 +511,8 @@ def main():
     app.add_handler(CommandHandler("setpic", set_pic_command))
     app.add_handler(CommandHandler("connect_channel", connect_channel))
     app.add_handler(CommandHandler("stats", stats_cmd))
-    app.add_handler(CommandHandler("upload_local_thumb", upload_local_thumb_cmd))
 
-    # editing
+    # edit params
     app.add_handler(CommandHandler("speed", speed_cmd))
     app.add_handler(CommandHandler("pitch", pitch_cmd))
     app.add_handler(CommandHandler("trim", trim_cmd))
@@ -627,25 +523,14 @@ def main():
     app.add_handler(CommandHandler("apply", apply_cmd))
     app.add_handler(CommandHandler("post_to_channel", post_to_channel_cmd))
 
-    # media handlers
+    # media
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_audio_upload))
-
-    # document router for image/audio documents (register in try/except to support older/newer PTB)
+    # document router to detect image/audio documents
     try:
         app.add_handler(MessageHandler(filters.Document, document_router))
     except Exception as e:
-        print("Warning: filters.Document not usable; document_router not registered. Exception:", e, flush=True)
-
-    # start health server if PORT set (useful if Render Web Service is used)
-    port = os.environ.get("PORT")
-    if port:
-        # start health server as background task if aiohttp is available
-        if AIOHTTP_AVAILABLE:
-            loop = asyncio.get_event_loop()
-            loop.create_task(start_health_server())
-        else:
-            print("PORT set but aiohttp not installed. Add aiohttp to requirements if you need a health endpoint.", flush=True)
+        print("Warning: filters.Document registration failed:", e, flush=True)
 
     print("Starting Music Editor Full Bot...", flush=True)
     try:
