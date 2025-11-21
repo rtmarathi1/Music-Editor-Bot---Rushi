@@ -7,7 +7,7 @@ import json
 import asyncio
 import subprocess
 from pathlib import Path
-from tempfile import mkstemp, gettempdir
+from tempfile import mkstemp
 from typing import Optional, Tuple
 import aiofiles
 import io
@@ -115,7 +115,6 @@ def convert_image_to_jpeg_bytes(in_path, max_size=(320,320), target_kb=160) -> b
     img.thumbnail(max_size, Image.LANCZOS)
     q_low, q_high = 20, 95
     best = None
-    best_size = None
     while q_low <= q_high:
         q_mid = (q_low + q_high)//2
         buf = io.BytesIO()
@@ -125,10 +124,8 @@ def convert_image_to_jpeg_bytes(in_path, max_size=(320,320), target_kb=160) -> b
             q_high = q_mid - 1
         else:
             best = buf.getvalue()
-            best_size = size_kb
             q_low = q_mid + 1
     if best is None:
-        # fallback
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=40, optimize=True)
         return buf.getvalue()
@@ -145,7 +142,6 @@ def embed_cover_in_mp3(mp3_path, jpeg_bytes, title=None, artist=None):
             audio.add_tags()
         except:
             pass
-    # remove old APIC
     try:
         audio.tags.delall("APIC")
     except Exception:
@@ -164,7 +160,6 @@ def embed_cover_in_mp3(mp3_path, jpeg_bytes, title=None, artist=None):
 
 def ensure_mp3_with_cover(in_path, out_mp3_path, cover_image_path=None, title=None, artist=None):
     """Convert any input to MP3 (libmp3lame), embed cover if provided, return path."""
-    # convert to mp3 first
     cmd = ["ffmpeg", "-y", "-i", in_path, "-vn", "-c:a", "libmp3lame", "-b:a", "192k", out_mp3_path]
     rc, out, err = ffmpeg_run(cmd, timeout=JOB_TIMEOUT_SECONDS)
     if rc != 0:
@@ -205,7 +200,6 @@ async def process_audio_file(in_path: str, out_path: str, params: dict) -> Tuple
         cmd += ["-filter:a", filter_str]
 
     outfmt = params.get("convert_to", "mp3").lower()
-    # choose output: produce requested format file (out_path already has suffix)
     if outfmt == "wav":
         cmd += ["-vn", "-ac", "2", "-ar", "44100", out_path]
     elif outfmt == "ogg":
@@ -213,7 +207,6 @@ async def process_audio_file(in_path: str, out_path: str, params: dict) -> Tuple
     elif outfmt in ("m4a", "aac"):
         cmd += ["-vn", "-c:a", "aac", "-b:a", "192k", out_path]
     else:
-        # default mp3
         cmd += ["-vn", "-c:a", "libmp3lame", "-b:a", "192k", out_path]
 
     loop = asyncio.get_event_loop()
@@ -270,7 +263,6 @@ async def photo_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     awaiting_chat = ctx.user_data.get('awaiting_pic_for_chat')
     if awaiting_chat and awaiting_chat == update.effective_chat.id:
-        # save file_id (we will download it later when embedding)
         photo = msg.photo[-1]  # highest resolution
         file_id = photo.file_id
         cs = ensure_chat_settings(awaiting_chat)
@@ -280,7 +272,6 @@ async def photo_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Album art saved (photo).")
         return
 
-    # If this is a forwarded channel message and awaiting channel connect:
     awaiting_channel = ctx.user_data.get('awaiting_channel_connect')
     if awaiting_channel and msg.forward_from_chat and msg.forward_from_chat.type == "channel":
         channel = msg.forward_from_chat
@@ -290,14 +281,13 @@ async def photo_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Channel registered: {channel.title}")
         return
 
-# document handler: handles uploaded documents (image/audio/video) robustly
+# document handler: handles uploaded documents (image/audio/video)
 async def document_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     doc = msg.document
     if not doc:
         return
     mime = (doc.mime_type or "").lower()
-    # if awaiting for cover and uploaded an image as document
     awaiting_chat = ctx.user_data.get('awaiting_pic_for_chat')
     if awaiting_chat and awaiting_chat == update.effective_chat.id and mime.startswith("image/"):
         cs = ensure_chat_settings(awaiting_chat)
@@ -307,7 +297,6 @@ async def document_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Album art saved (uploaded image).")
         return
 
-    # channel connect via forwarded doc
     awaiting_channel = ctx.user_data.get('awaiting_channel_connect')
     if awaiting_channel and msg.forward_from_chat and msg.forward_from_chat.type == "channel":
         channel = msg.forward_from_chat
@@ -317,13 +306,12 @@ async def document_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Channel registered: {channel.title}")
         return
 
-    # otherwise, if document is audio/video/image treat accordingly: pass to audio handler if audio/video
+    # if document is audio/video -> treat as upload
     if mime.startswith("audio/") or mime.startswith("video/"):
-        # re-use handle_audio_upload logic by placing doc into ctx.user_data and calling that handler
-        ctx.user_data["last_uploaded_doc"] = doc  # we will download it in handle_audio_upload
+        ctx.user_data["last_uploaded_doc"] = doc
         await handle_audio_upload(update, ctx)
         return
-    # else ignore other document types
+
     await msg.reply_text("Unsupported document type. For album art use an image (jpg/png). For audio send voice/audio/video.")
 
 async def connect_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -415,17 +403,14 @@ async def handle_audio_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Accept voice/audio/document (audio/video) and save to temp file path."""
     msg = update.message
     file_obj = None
-    # priority: voice -> audio -> attached document in ctx.user_data
     if msg.voice:
         file_obj = msg.voice
     elif msg.audio:
         file_obj = msg.audio
     elif msg.document:
-        # document may be audio or video; check mime
         mime = (msg.document.mime_type or "").lower()
         if mime.startswith("audio/") or mime.startswith("video/"):
             file_obj = msg.document
-    # fallback if a doc was saved in user_data by document_handler
     if not file_obj and ctx.user_data.get("last_uploaded_doc"):
         file_obj = ctx.user_data.pop("last_uploaded_doc")
 
@@ -438,7 +423,7 @@ async def handle_audio_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     try:
         await save_file_from_telegram(file_obj, in_path)
-    except Exception as e:
+    except Exception:
         await msg.reply_text("Failed to download file.")
         try: os.remove(in_path)
         except: pass
@@ -459,13 +444,11 @@ async def _generate_and_send_mp3_with_cover(update: Update, ctx, in_path: str, p
     artist = cs.get("artist")
     picture_file_id = cs.get("picture_file_id")
 
-    # prepare a temporary cover path if set (download it)
     cover_path = None
     if picture_file_id:
         try:
             fd, cover_path = mkstemp(suffix=".img")
             os.close(fd)
-            # download cover file
             tgfile = await ctx.bot.get_file(picture_file_id)
             await tgfile.download_to_drive(cover_path)
         except Exception:
@@ -473,40 +456,25 @@ async def _generate_and_send_mp3_with_cover(update: Update, ctx, in_path: str, p
             except: pass
             cover_path = None
 
-    # for preview, we will enforce 10s clip
     params_preview = params.copy()
     if preview:
         params_preview["trim_start"] = params_preview.get("trim_start", 0)
         params_preview["trim_end"] = params_preview.get("trim_end", 10)
 
-    # produce a temp output mp3
     fd_out, out_mp3 = mkstemp(suffix=".mp3")
     os.close(fd_out)
 
-    # always convert to mp3 and embed cover
     try:
-        # convert (using ensure_mp3_with_cover) inside semaphore
         loop = asyncio.get_event_loop()
         def convert_job():
-            try:
-                return ensure_mp3_with_cover(in_path, out_mp3, cover_image_path=cover_path, title=None, artist=artist)
-            except Exception as e:
-                raise
+            return ensure_mp3_with_cover(in_path, out_mp3, cover_image_path=cover_path, title=None, artist=artist)
+        await loop.run_in_executor(None, convert_job)
 
-        # run conversion in executor
-        try:
-            await loop.run_in_executor(None, convert_job)
-        except Exception as e:
-            raise
-
-        # send as audio (so Telegram marks it as music). Avoid 'thumb' kwarg.
         with open(out_mp3, "rb") as f:
             await ctx.bot.send_audio(chat_id=chat, audio=InputFile(f, filename="edited.mp3"), performer=artist)
     finally:
-        try:
-            os.remove(out_mp3)
-        except:
-            pass
+        try: os.remove(out_mp3)
+        except: pass
         if cover_path:
             try: os.remove(cover_path)
             except: pass
@@ -535,7 +503,6 @@ async def apply_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     params = get_last_params_for_chat(chat).copy()
     await update.message.reply_text("Processing full file... This may take a moment.")
     async with job_semaphore:
-        # produce requested format file
         fmt = params.get("convert_to", "mp3").lower()
         fd_out, out_path = mkstemp(suffix=f".{fmt}")
         os.close(fd_out)
@@ -547,7 +514,6 @@ async def apply_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 except: pass
                 return
 
-            # increment stats
             stats["total_processed"] = stats.get("total_processed", 0) + 1
             uid = str(chat)
             stats.setdefault("by_user", {})
@@ -556,20 +522,18 @@ async def apply_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
             cs = ensure_chat_settings(chat)
             artist = cs.get("artist")
+            picture_file_id = cs.get("picture_file_id")
+            cover_path = None
+            if picture_file_id:
+                try:
+                    fd_cp, cover_path = mkstemp(suffix=".img")
+                    os.close(fd_cp)
+                    tgfile = await ctx.bot.get_file(picture_file_id)
+                    await tgfile.download_to_drive(cover_path)
+                except:
+                    cover_path = None
 
-            # If output is mp3 -> embed cover (download saved picture and embed), then send as audio
             if fmt == "mp3":
-                # embed cover if available
-                picture_file_id = cs.get("picture_file_id")
-                cover_path = None
-                if picture_file_id:
-                    try:
-                        fd_cp, cover_path = mkstemp(suffix=".img")
-                        os.close(fd_cp)
-                        tgfile = await ctx.bot.get_file(picture_file_id)
-                        await tgfile.download_to_drive(cover_path)
-                    except:
-                        cover_path = None
                 if cover_path:
                     try:
                         jpeg_bytes = convert_image_to_jpeg_bytes(cover_path)
@@ -580,42 +544,34 @@ async def apply_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         if cover_path:
                             try: os.remove(cover_path)
                             except: pass
-
-                # send as audio (no thumb kwarg)
                 with open(out_path, "rb") as f:
                     await ctx.bot.send_audio(chat_id=chat, audio=InputFile(f, filename=f"edited.{fmt}"), performer=artist)
             else:
-                # If not mp3, create an mp3 copy with cover for "music" sending and also send requested format as document
-                # create mp3 copy
                 fd_mp3, out_mp3 = mkstemp(suffix=".mp3")
                 os.close(fd_mp3)
                 try:
-                    # convert and embed (cover if present)
-                    cs = ensure_chat_settings(chat)
-                    picture_file_id = cs.get("picture_file_id")
-                    cover_path = None
                     if picture_file_id:
+                        cover_path2 = None
                         try:
-                            fd_cp, cover_path = mkstemp(suffix=".img")
+                            fd_cp, cover_path2 = mkstemp(suffix=".img")
                             os.close(fd_cp)
                             tgfile = await ctx.bot.get_file(picture_file_id)
-                            await tgfile.download_to_drive(cover_path)
+                            await tgfile.download_to_drive(cover_path2)
                         except:
-                            cover_path = None
-                    # convert to mp3 + embed
-                    await asyncio.get_event_loop().run_in_executor(None, ensure_mp3_with_cover, out_path, out_mp3, cover_path, None, artist)
-                    # send mp3 as audio (music)
+                            cover_path2 = None
+                    else:
+                        cover_path2 = None
+                    await asyncio.get_event_loop().run_in_executor(None, ensure_mp3_with_cover, out_path, out_mp3, cover_path2, None, artist)
                     with open(out_mp3, "rb") as f:
                         await ctx.bot.send_audio(chat_id=chat, audio=InputFile(f, filename="edited.mp3"), performer=artist)
-                    # also send requested file as document for download if user wants original format
                     with open(out_path, "rb") as fd:
                         await ctx.bot.send_document(chat_id=chat, document=InputFile(fd, filename=f"edited.{fmt}"))
                 finally:
                     try: os.remove(out_mp3)
                     except: pass
-                    try:
-                        if cover_path: os.remove(cover_path)
-                    except: pass
+                    if cover_path:
+                        try: os.remove(cover_path)
+                        except: pass
 
         finally:
             try: os.remove(out_path)
@@ -666,7 +622,6 @@ async def post_to_channel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             with open(out_path, "rb") as f:
                 await ctx.bot.send_audio(chat_id=int(channel_id), audio=InputFile(f, filename=f"channel_post.{fmt}"), performer=artist)
         else:
-            # create mp3 with cover for posting visually as music, and also send original as document
             fd_mp3, out_mp3 = mkstemp(suffix=".mp3")
             os.close(fd_mp3)
             try:
@@ -715,12 +670,12 @@ def main():
     app.add_handler(CommandHandler("apply", apply_cmd))
     app.add_handler(CommandHandler("post_to_channel", post_to_channel_cmd))
 
-    # handlers: separate for PHOTO and DOCUMENT to avoid filters merging errors
-    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, photo_handler))
-    app.add_handler(MessageHandler(filters.Document & ~filters.COMMAND, document_handler))
+    # handlers: separate for PHOTO and DOCUMENT (do NOT combine with inverted filters to avoid PTB filter type errors)
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    app.add_handler(MessageHandler(filters.Document, document_handler))
 
     # voice and audio handler
-    app.add_handler(MessageHandler((filters.VOICE | filters.AUDIO) & ~filters.COMMAND, handle_audio_upload))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_audio_upload))
 
     print("Starting Music Editor Full Bot...")
     app.run_polling()
