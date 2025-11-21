@@ -2,6 +2,9 @@
 FROM python:3.11-slim
 
 # Install ffmpeg + system deps needed by pillow/ffmpeg
+RUN apt-get update && apt-get install -y ffmpeg
+
+
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ffmpeg \
