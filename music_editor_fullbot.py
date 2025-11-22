@@ -114,9 +114,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Usage:\n"
-        "- Send an image to set it as cover.\n"
-        "- Then send an MP3 (audio/document) to embed the cover into the file and get processed file back.\n"
+        "Usage:
+"
+        "- Send an image to set it as cover.
+"
+        "- Then send an MP3 (audio/document) to embed the cover into the file and get processed file back.
+"
         "- You can also send /setmeta Title - Artist to set metadata before uploading the audio."
     )
 
@@ -207,7 +210,7 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await msg.reply_text("Downloading file...")
 
     # use a stable filename
-    safe_filename = filename.replace("/", "_").replace("\\", "_")
+    safe_filename = filename.replace("/", "_").replace("\", "_")
     tmp_audio_in = TMP_DIR / f"upload_{user_id}_{int(asyncio.get_event_loop().time()*1000)}_{safe_filename}"
     await save_telegram_file(file_obj, tmp_audio_in)
 
