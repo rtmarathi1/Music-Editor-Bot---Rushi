@@ -1,14 +1,15 @@
 """
-Fixed Music Editor Full Bot
+Music Editor Full Bot (fixed)
+
 - Compatible with python-telegram-bot v22.x
 - Embeds cover art into MP3 (ID3 APIC) using mutagen
 - Accepts any image size and resizes to a square thumbnail (maintains aspect)
-- Avoids using the 'thumb' argument to send_audio (some PTB wrappers remove it)
+- Opens files before passing to InputFile to avoid httpx multipart errors
 - Uses Application.builder().post_init(on_startup).build()
 - Handles audio uploads (audio, voice, document) and photo uploads
 
-Drop this file in place of your old `music_editor_fullbot.py`.
-Make sure your requirements include: python-telegram-bot==22.5 mutagen Pillow aiofiles
+Make sure requirements include:
+python-telegram-bot==22.5 mutagen Pillow aiofiles
 """
 
 import os
@@ -20,7 +21,6 @@ from typing import Optional
 
 from PIL import Image
 from mutagen.id3 import ID3, APIC, TIT2, TPE1, ID3NoHeaderError
-from mutagen.mp3 import MP3
 
 from telegram import Update, InputFile
 from telegram.ext import (
@@ -42,27 +42,32 @@ logger = logging.getLogger(__name__)
 
 # ---------- Utilities ----------
 async def save_telegram_file(file_obj, dest_path: Path):
-    """Download and save a Telegram file asynchronously."""
+    """Download and save a Telegram file asynchronously to dest_path and return the Path."""
+    # file_obj is telegram.File
     await file_obj.download_to_drive(custom_path=str(dest_path))
     return dest_path
 
 
 def resize_cover(in_path: Path, out_path: Path, size: int = 600) -> None:
-    """Open image, convert to RGB and resize preserving aspect, then save as JPEG.
+    """
+    Open image, convert to RGB and resize preserving aspect, then save as JPEG.
+
     size: max dimension for longest side.
     """
     img = Image.open(in_path)
     img = img.convert("RGB")
     w, h = img.size
     scale = size / max(w, h)
-    new_w = int(w * scale)
-    new_h = int(h * scale)
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
     img = img.resize((new_w, new_h), Image.LANCZOS)
     img.save(out_path, format="JPEG")
 
 
 def embed_cover_in_mp3(mp3_path: Path, cover_jpeg_path: Path, title: Optional[str] = None, artist: Optional[str] = None) -> None:
-    """Embed JPEG cover into MP3 file using ID3 APIC frame. If no ID3 header exists, it will be created."""
+    """
+    Embed JPEG cover into MP3 file using ID3 APIC frame. If no ID3 header exists, it will be created.
+    """
     try:
         tags = ID3(mp3_path)
     except ID3NoHeaderError:
@@ -109,10 +114,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        """Usage:
-- Send an image to set it as cover.
-- Then send an MP3 (audio/document) to embed the cover into the file and get processed file back.
-- You can also send /setmeta Title - Artist to set metadata before uploading the audio."""
+        "Usage:\n"
+        "- Send an image to set it as cover.\n"
+        "- Then send an MP3 (audio/document) to embed the cover into the file and get processed file back.\n"
+        "- You can also send /setmeta Title - Artist to set metadata before uploading the audio."
     )
 
 
@@ -132,7 +137,10 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     photo = photos[-1]
     tmp_in = TMP_DIR / f"cover_{user_id}_in"
     tmp_out = TMP_DIR / f"cover_{user_id}.jpg"
-    await save_telegram_file(await photo.get_file(), tmp_in)
+
+    # download
+    file_obj = await photo.get_file()
+    await save_telegram_file(file_obj, tmp_in)
 
     try:
         resize_cover(tmp_in, tmp_out, size=800)
@@ -157,8 +165,8 @@ async def setmeta_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     artist = None
     if "-" in payload:
         parts = payload.split("-", 1)
-        title = parts[0].strip()
-        artist = parts[1].strip()
+        title = parts[0].strip() or None
+        artist = parts[1].strip() or None
     elif payload:
         title = payload
 
@@ -174,6 +182,9 @@ async def setmeta_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle audio/document/voice uploads and embed cover if available."""
     msg = update.message
+    if not msg:
+        return
+
     user_id = update.effective_user.id
 
     file_obj = None
@@ -183,6 +194,7 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         file_obj = await msg.audio.get_file()
         filename = msg.audio.file_name or f"audio_{user_id}.mp3"
     elif msg.document:
+        # document may be any file
         file_obj = await msg.document.get_file()
         filename = msg.document.file_name or f"audio_{user_id}"
     elif msg.voice:
@@ -194,11 +206,13 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     await msg.reply_text("Downloading file...")
 
-    tmp_audio_in = TMP_DIR / f"upload_{user_id}_{int(asyncio.get_event_loop().time()*1000)}_{filename}"
+    # use a stable filename
+    safe_filename = filename.replace("/", "_").replace("\\", "_")
+    tmp_audio_in = TMP_DIR / f"upload_{user_id}_{int(asyncio.get_event_loop().time()*1000)}_{safe_filename}"
     await save_telegram_file(file_obj, tmp_audio_in)
 
     # determine if mp3
-    lower = filename.lower()
+    lower = safe_filename.lower()
     is_mp3 = lower.endswith('.mp3') or tmp_audio_in.suffix.lower() == '.mp3'
 
     # check user metadata and cover
@@ -216,29 +230,40 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             except Exception as e:
                 logger.exception("Embed failed: %s", e)
                 await msg.reply_text("Failed to embed cover. Sending original file instead.")
-                with open(tmp_audio_in, 'rb') as f:
-                    await msg.reply_document(document=InputFile(f, filename=filename), filename=filename)
+                # open file before sending
+                try:
+                    with open(tmp_audio_in, "rb") as f:
+                        await msg.reply_document(document=InputFile(f, filename=safe_filename), filename=safe_filename)
+                except Exception:
+                    logger.exception("Failed to send original file after embed failure.")
+                    await msg.reply_text("Couldn't send file back to you.")
                 return
 
             # send resulting mp3 as document (so clients download the file and see embedded cover)
-            with open(tmp_audio_in, 'rb') as f:
-                await msg.reply_document(document=InputFile(f, filename=filename), filename=filename)
-            await msg.reply_text("Done — cover embedded.")
-
-            # clear title/artist state so next upload can start fresh (optional)
-            # USER_STATE.pop(user_id, None)
+            try:
+                with open(tmp_audio_in, "rb") as f:
+                    await msg.reply_document(document=InputFile(f, filename=safe_filename), filename=safe_filename)
+                await msg.reply_text("Done — cover embedded.")
+            except Exception:
+                logger.exception("Failed to send embedded mp3.")
+                await msg.reply_text("Embedded file created but failed to send. Try again later.")
             return
 
         else:
             # if not MP3 or no cover, simply forward/send file back to user
             await msg.reply_text("No MP3/cover found or cover not set. Sending back the original file.")
-            with open(tmp_audio_in, 'rb') as f:
-                await msg.reply_document(document=InputFile(f, filename=filename), filename=filename)
+            try:
+                with open(tmp_audio_in, "rb") as f:
+                    await msg.reply_document(document=InputFile(f, filename=safe_filename), filename=safe_filename)
+            except Exception:
+                logger.exception("Failed to send original file.")
+                await msg.reply_text("Couldn't send file back to you.")
             return
 
     except Exception as exc:
         logger.exception("Processing failed: %s", exc)
-        await msg.reply_text("An error occurred while processing the file.")
+        # TIMEOUT / Network errors bubble up; provide user-friendly message
+        await msg.reply_text("An error occurred while processing the file. Try again later.")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -251,7 +276,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ---------- Application builder ----------
-
 def build_application() -> Application:
     # post_init must be set on builder for PTB v22
     app = (
