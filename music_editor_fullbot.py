@@ -109,10 +109,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Usage:
+        """Usage:
 - Send an image to set it as cover.
 - Then send an MP3 (audio/document) to embed the cover into the file and get processed file back.
-- You can also send /setmeta Title - Artist to set metadata before uploading the audio."
+- You can also send /setmeta Title - Artist to set metadata before uploading the audio."""
     )
 
 
@@ -216,23 +216,24 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             except Exception as e:
                 logger.exception("Embed failed: %s", e)
                 await msg.reply_text("Failed to embed cover. Sending original file instead.")
-                # send original file safely by opening as binary
                 with open(tmp_audio_in, 'rb') as f:
-                    await msg.reply_document(document=InputFile(f), filename=filename)
+                    await msg.reply_document(document=InputFile(f, filename=filename), filename=filename)
                 return
 
             # send resulting mp3 as document (so clients download the file and see embedded cover)
             with open(tmp_audio_in, 'rb') as f:
-                await msg.reply_document(document=InputFile(f), filename=filename)
+                await msg.reply_document(document=InputFile(f, filename=filename), filename=filename)
             await msg.reply_text("Done — cover embedded.")
 
+            # clear title/artist state so next upload can start fresh (optional)
+            # USER_STATE.pop(user_id, None)
             return
 
         else:
             # if not MP3 or no cover, simply forward/send file back to user
             await msg.reply_text("No MP3/cover found or cover not set. Sending back the original file.")
             with open(tmp_audio_in, 'rb') as f:
-                await msg.reply_document(document=InputFile(f), filename=filename)
+                await msg.reply_document(document=InputFile(f, filename=filename), filename=filename)
             return
 
     except Exception as exc:
