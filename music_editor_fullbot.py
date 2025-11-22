@@ -1,10 +1,11 @@
 """
-Fixed Music Editor Full Bot (patched to avoid PosixPath -> InputFile bug)
+Fixed Music Editor Full Bot
 - Compatible with python-telegram-bot v22.x
 - Embeds cover art into MP3 (ID3 APIC) using mutagen
-- Accepts images, resizes them, and stores per-user cover
-- Opens files as binary streams when sending to Telegram (fixes AttributeError: 'PosixPath' object has no attribute 'read')
+- Accepts any image size and resizes to a square thumbnail (maintains aspect)
+- Avoids using the 'thumb' argument to send_audio (some PTB wrappers remove it)
 - Uses Application.builder().post_init(on_startup).build()
+- Handles audio uploads (audio, voice, document) and photo uploads
 
 Drop this file in place of your old `music_editor_fullbot.py`.
 Make sure your requirements include: python-telegram-bot==22.5 mutagen Pillow aiofiles
@@ -19,6 +20,7 @@ from typing import Optional
 
 from PIL import Image
 from mutagen.id3 import ID3, APIC, TIT2, TPE1, ID3NoHeaderError
+from mutagen.mp3 import MP3
 
 from telegram import Update, InputFile
 from telegram.ext import (
@@ -53,8 +55,8 @@ def resize_cover(in_path: Path, out_path: Path, size: int = 600) -> None:
     img = img.convert("RGB")
     w, h = img.size
     scale = size / max(w, h)
-    new_w = max(1, int(w * scale))
-    new_h = max(1, int(h * scale))
+    new_w = int(w * scale)
+    new_h = int(h * scale)
     img = img.resize((new_w, new_h), Image.LANCZOS)
     img.save(out_path, format="JPEG")
 
@@ -74,9 +76,9 @@ def embed_cover_in_mp3(mp3_path: Path, cover_jpeg_path: Path, title: Optional[st
     tags.add(
         APIC(
             encoding=3,  # 3 => utf-8
-            mime="image/jpeg",
+            mime='image/jpeg',
             type=3,  # 3 => cover (front)
-            desc="cover",
+            desc='cover',
             data=img_data,
         )
     )
@@ -93,8 +95,9 @@ def embed_cover_in_mp3(mp3_path: Path, cover_jpeg_path: Path, title: Optional[st
 
 # ---------- Handlers ----------
 async def on_startup(app: Application) -> None:
-    """Called after application is built. Ensure webhook removed (avoid conflict)."""
+    """Called after application is built. Ensure webhook removed (avoid conflict)"""
     try:
+        # if running in polling mode ensure no webhook conflicts
         await app.bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
         logger.debug("delete_webhook failed: %s", e)
@@ -108,13 +111,13 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Usage:
 - Send an image to set it as cover.
-- Then send an MP3 (audio/document) to embed the cover into the file.
-- You can also send /setmeta title - artist to set metadata before uploading the audio.""
+- Then send an MP3 (audio/document) to embed the cover into the file and get processed file back.
+- You can also send /setmeta Title - Artist to set metadata before uploading the audio."
     )
 
 
 # simple in-memory map to hold last cover per user; for persistence you can store on disk
-USER_STATE: dict = {}
+USER_STATE = {}
 
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -127,7 +130,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # get the largest size photo (last in sizes)
     photo = photos[-1]
-    tmp_in = TMP_DIR / f"cover_{user_id}_in.jpg"
+    tmp_in = TMP_DIR / f"cover_{user_id}_in"
     tmp_out = TMP_DIR / f"cover_{user_id}.jpg"
     await save_telegram_file(await photo.get_file(), tmp_in)
 
@@ -154,10 +157,10 @@ async def setmeta_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     artist = None
     if "-" in payload:
         parts = payload.split("-", 1)
-        title = parts[0].strip() or None
-        artist = parts[1].strip() or None
+        title = parts[0].strip()
+        artist = parts[1].strip()
     elif payload:
-        title = payload or None
+        title = payload
 
     USER_STATE[user_id] = USER_STATE.get(user_id, {})
     if title:
@@ -166,21 +169,6 @@ async def setmeta_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         USER_STATE[user_id]["artist"] = artist
 
     await update.message.reply_text(f"Metadata set. Title: {title or 'None'}, Artist: {artist or 'None'}")
-
-
-async def send_document_file(msg, path: Path, filename: str) -> None:
-    """
-    Open file at `path` in binary mode, send it to user as a document with `filename`,
-    then close the file to avoid leaking file descriptors.
-    """
-    f = open(path, "rb")
-    try:
-        await msg.reply_document(document=InputFile(f), filename=filename)
-    finally:
-        try:
-            f.close()
-        except Exception:
-            logger.debug("Failed to close file %s", path)
 
 
 async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -195,7 +183,6 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         file_obj = await msg.audio.get_file()
         filename = msg.audio.file_name or f"audio_{user_id}.mp3"
     elif msg.document:
-        # documents may or may not be audio; handle generically
         file_obj = await msg.document.get_file()
         filename = msg.document.file_name or f"audio_{user_id}"
     elif msg.voice:
@@ -207,15 +194,12 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     await msg.reply_text("Downloading file...")
 
-    # safe filename and unique id
-    safe_name = "".join(c for c in filename if c.isalnum() or c in (" ", ".", "_", "-")).strip()
-    unique = int(asyncio.get_event_loop().time() * 1000)
-    tmp_audio_in = TMP_DIR / f"upload_{user_id}_{unique}_{safe_name}"
+    tmp_audio_in = TMP_DIR / f"upload_{user_id}_{int(asyncio.get_event_loop().time()*1000)}_{filename}"
     await save_telegram_file(file_obj, tmp_audio_in)
 
     # determine if mp3
-    lower = str(filename).lower()
-    is_mp3 = lower.endswith(".mp3") or tmp_audio_in.suffix.lower() == ".mp3"
+    lower = filename.lower()
+    is_mp3 = lower.endswith('.mp3') or tmp_audio_in.suffix.lower() == '.mp3'
 
     # check user metadata and cover
     state = USER_STATE.get(user_id, {})
@@ -232,23 +216,23 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             except Exception as e:
                 logger.exception("Embed failed: %s", e)
                 await msg.reply_text("Failed to embed cover. Sending original file instead.")
-                await send_document_file(msg, tmp_audio_in, filename)
+                # send original file safely by opening as binary
+                with open(tmp_audio_in, 'rb') as f:
+                    await msg.reply_document(document=InputFile(f), filename=filename)
                 return
 
             # send resulting mp3 as document (so clients download the file and see embedded cover)
-            await send_document_file(msg, tmp_audio_in, filename)
+            with open(tmp_audio_in, 'rb') as f:
+                await msg.reply_document(document=InputFile(f), filename=filename)
             await msg.reply_text("Done — cover embedded.")
+
             return
 
         else:
             # if not MP3 or no cover, simply forward/send file back to user
-            if not is_mp3:
-                await msg.reply_text("File is not an MP3. I'll send your original file back.")
-            elif not cover_path:
-                await msg.reply_text("No cover set. Sending back original file.")
-            else:
-                await msg.reply_text("Unable to process file; sending original back.")
-            await send_document_file(msg, tmp_audio_in, filename)
+            await msg.reply_text("No MP3/cover found or cover not set. Sending back the original file.")
+            with open(tmp_audio_in, 'rb') as f:
+                await msg.reply_document(document=InputFile(f), filename=filename)
             return
 
     except Exception as exc:
@@ -257,16 +241,6 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # ignore getUpdates conflict errors (happens if another instance uses getUpdates)
-    err = getattr(context, "error", None)
-    try:
-        # telegram.error.Conflict has class name 'Conflict' and may appear nested in exceptions
-        if err is not None and "Conflict: terminated by other getUpdates request" in str(err):
-            logger.warning("Ignoring getUpdates Conflict (another instance running): %s", err)
-            return
-    except Exception:
-        pass
-
     logger.error("Exception while handling an update: %s", context.error)
     try:
         if isinstance(update, Update) and update.effective_message:
@@ -311,11 +285,8 @@ def main() -> None:
     app = build_application()
 
     # Run polling. In production you may prefer webhook.
-    try:
-        app.run_polling()
-    except Exception as e:
-        logger.exception("Polling exited with exception: %s", e)
+    app.run_polling()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
